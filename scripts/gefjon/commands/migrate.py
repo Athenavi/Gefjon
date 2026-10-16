@@ -10,6 +10,7 @@ import typer
 from ..alembic_support import (
     build_config,
     ensure_database_url,
+    preview_changes,
     print_history,
     read_state,
     run_downgrade,
@@ -47,6 +48,17 @@ def _do_backup(root: Path, migration_dir: str, current: str | None) -> None:
         typer.echo(f"  备份：{result.directory}")
 
 
+def _print_preview(root: Path, gefjon_config) -> None:
+    """``--dry-run`` 的实现：只打印将要应用的 schema 变更。"""
+    changes = preview_changes(root, gefjon_config)
+    if not changes:
+        typer.secho("没有待应用的 schema 变更", fg=typer.colors.GREEN)
+        return
+    typer.echo("将要应用的 schema 变更：")
+    for line in changes:
+        typer.echo(line)
+
+
 def _record_version_map(root: Path, gefjon_config, revision: str | None) -> None:
     version_map = load_version_map(root) or VersionMap.from_third_party(
         gefjon_config.project.name,
@@ -81,11 +93,19 @@ def migrate(
     backup: bool = typer.Option(
         True, "--backup/--no-backup", help="生成前备份迁移脚本目录"
     ),
+    dry_run: bool = typer.Option(
+        False, "--dry-run", help="只显示将要应用的 schema 变更，不生成脚本也不执行"
+    ),
     config: Optional[Path] = typer.Option(None, "--config", "-c", help="models.yaml 路径"),
 ) -> None:
     """生成一个新的迁移脚本。"""
     try:
         root, gefjon_config, alembic_config = _load_context(config)
+
+        if dry_run:
+            _print_preview(root, gefjon_config)
+            return
+
         migration_dir = gefjon_config.migration.directory
         current = _current_revision(alembic_config, root)
 

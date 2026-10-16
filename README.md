@@ -64,7 +64,7 @@ pip install gefjon
 从源码安装：
 
 ```bash
-git clone https://github.com/yourusername/gefjon.git
+git clone https://github.com/Athenavi/Gefjon.git
 cd gefjon
 pip install -e ".[dev]"
 ```
@@ -166,6 +166,7 @@ mapping:
 | `table` | 表名；省略时由类名推断（`User` → `users`） |
 | `description` | 模型说明，写入类 docstring |
 | `module` | 输出子目录，如 `auth` → `models/auth/user.py` |
+| `relationships` | ORM 关系，见下方[关系（relationship）](#关系relationship) |
 | `unlogged` | PostgreSQL：生成 UNLOGGED 表（建表后执行 `ALTER TABLE ... SET UNLOGGED`） |
 
 ### 字段选项
@@ -310,6 +311,50 @@ indexes:
 `where` 与 `expressions` 都只接受上述受限语法（解析后按结构化结果重新拼装 SQL），
 出现 `;`、`--`、`(` 等一律拒绝 —— 因此 `models.yaml` 里的条件无法注入任意 SQL。
 
+### 关系（relationship）
+
+用 `relationships` 声明 ORM 关系，生成对应的 `relationship(...)`：
+
+```yaml
+models:
+  - name: User
+    fields:
+      - name: id
+        type: Integer
+        primary_key: true
+    relationships:
+      - name: posts                    # 属性名
+        target: Post                   # 必须是已声明的模型名
+        back_populates: author         # 反向关系的属性名（两边都要写）
+        cascade: "all, delete-orphan"  # 可选
+        lazy: selectin                 # 可选
+  - name: Post
+    fields:
+      - name: id
+        type: Integer
+        primary_key: true
+      - name: user_id
+        type: Integer
+        foreign_key: users.id
+    relationships:
+      - name: author
+        target: User
+        back_populates: posts
+```
+
+| 选项 | 说明 |
+| :--- | :--- |
+| `name` | 属性名（合法标识符，且不能与该模型的字段重名） |
+| `target` | 目标模型名，必须在同一份 `models.yaml` 中声明过 |
+| `back_populates` | 反向关系的属性名；两边都写，解析时会交叉校验它确实存在 |
+| `cascade` | 可选，逗号分隔；只允许 `all` / `save-update` / `merge` / `expunge` / `delete` / `delete-orphan` / `no-delete-orphan` / `refresh-expire` |
+| `lazy` | 可选；只允许 `select` / `joined` / `subquery` / `selectin` / `immediate` / `noload` / `raise` / `raise_on_sql` / `write_only` / `dynamic` |
+| `uselist` | 可选，布尔值（自引用、一对一场景） |
+| `secondary` | 可选，多对多的中间表名 |
+
+`target` 走存在性校验，`cascade` / `lazy` 走白名单，因此它们不会把任意字符串写进生成代码。
+`primaryjoin` / `secondaryjoin` 这类**原始 SQL 表达式不支持**（属于注入面，见 Roadmap）。
+
 ### 默认值
 
 只有白名单内的表达式会被当作表达式，其余字符串按**字符串字面量**处理：
@@ -331,8 +376,8 @@ indexes:
 | 命令 | 说明 |
 | :--- | :--- |
 | `gefjon init` | 初始化项目结构（`migrations/`、`alembic.ini`、`env.py`、示例 `models.yaml`） |
-| `gefjon generate` | 按 `models.yaml` 生成 ORM 模型代码 |
-| `gefjon migrate` | 生成新的迁移脚本（默认**只生成不执行**） |
+| `gefjon generate` | 按 `models.yaml` 生成 ORM 模型代码；加 `--check` 只校验是否一致 |
+| `gefjon migrate` | 生成新的迁移脚本（默认**只生成不执行**）；加 `--dry-run` 只预览变更 |
 | `gefjon upgrade` | 应用迁移到指定 revision（默认 `head`） |
 | `gefjon downgrade` | 回滚到指定 revision（默认 `base`） |
 | `gefjon history` | 显示迁移历史 |
@@ -345,6 +390,8 @@ indexes:
 ```bash
 gefjon generate --output ./models --model User --model Post   # 只生成指定模型
 gefjon generate --no-backup                                   # 不备份旧输出
+gefjon generate --check                                       # 只校验模型包与 models.yaml 是否一致（CI 用）
+gefjon migrate --dry-run                                      # 预览将要应用的 schema 变更
 gefjon migrate --message "add index" --no-autogenerate        # 生成空脚本手工编写
 gefjon migrate --message "add index" --apply                  # 生成后立即应用
 gefjon upgrade 123abc                                         # 升级到指定 revision
@@ -414,7 +461,7 @@ pip install -e ".[dev]"
 pytest
 ```
 
-测试覆盖：配置校验（含字段默认值、`index.where` 与 `expressions` 的注入尝试）、类型目录（含“登记的类型名必须真实存在于 SQLAlchemy”的校验、以及 udt 类型的生成）、生成产物可编译且**可导入**（含真实 DDL 断言）、`nullable`/`unique` 语义、索引方言参数与表达式索引、`UNLOGGED` 与 `CONCURRENTLY`、方言 import 分组、“模板缺失时不写空文件”、连接串遮盖与 fail-closed 解析、`install.lock` 往返与篡改检测、以及 `init → generate → migrate → upgrade → status` 的端到端流程。
+测试覆盖：配置校验（含字段默认值、`index.where`、`expressions` 的注入尝试与 `cascade`/`lazy` 白名单）、类型目录（含“登记的类型名必须真实存在于 SQLAlchemy”的校验、以及 udt 类型的生成）、生成产物可编译且**可导入**（含真实 DDL 断言与 `relationship` 配对）、生成的**确定性**与 `generate --check` 的漂移检测（缺失/改动/孤儿文件）、`nullable`/`unique` 语义、索引方言参数与表达式索引、`UNLOGGED` 与 `CONCURRENTLY`、`migrate --dry-run`、方言 import 分组、“模板缺失时不写空文件”、连接串遮盖与 fail-closed 解析、`install.lock` 往返与篡改检测、`init → generate → migrate → upgrade → status` 的端到端流程，以及在**真实 PostgreSQL**（CI 的 postgres 服务容器）上验证列类型、UNLOGGED 与版本表。
 
 ---
 

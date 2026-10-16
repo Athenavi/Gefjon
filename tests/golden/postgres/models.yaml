@@ -1,0 +1,45 @@
+project:
+  name: golden-postgres
+  version: 2.0.0
+
+database:
+  dialect: postgresql
+
+models:
+  - name: Doc
+    table: docs
+    description: 文档
+    unlogged: true
+    fields:
+      - name: id
+        type: Integer
+        primary_key: true
+      - name: payload
+        type: JSONB
+      - name: tags
+        type: pg.ARRAY
+        item_type: Text
+      - name: addr
+        type: INET
+      - name: uid
+        type: uuid
+      - name: seen_at
+        type: pg.TIMESTAMP
+        timezone: true
+      - name: bits
+        type: varbit(8)
+      - name: shape
+        type: pg.POLYGON
+      - name: postal_code
+        type: DOMAIN
+        domain_name: us_postal_code
+        item_type: String(5)
+        not_null: true
+    indexes:
+      - columns: [payload]
+        using: gin
+        ops: {payload: jsonb_path_ops}
+      - columns: [addr]
+        where: "addr IS NOT NULL"
+      - expressions: ["lower(payload)"]
+        concurrently: true

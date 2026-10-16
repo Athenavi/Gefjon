@@ -149,3 +149,133 @@ def test_init_then_generate_does_not_touch_source(workdir: Path) -> None:
     assert (workdir / "models").is_dir()
     assert not (workdir / "configs").exists()
     assert not (workdir / "scripts").exists()
+
+
+# ── generate --check（漂移检测）───────────────────────────────────────
+
+
+def test_generate_check_passes_after_generate(workdir: Path) -> None:
+    runner.invoke(app, ["init"])
+    runner.invoke(app, ["generate"])
+    result = runner.invoke(app, ["generate", "--check"])
+    assert result.exit_code == 0, result.output
+    assert "一致" in result.output
+
+
+def test_generate_is_deterministic(workdir: Path) -> None:
+    """连续两次生成的产物必须逐字一致，否则 --check 没有意义。"""
+    runner.invoke(app, ["init"])
+    runner.invoke(app, ["generate"])
+    models = workdir / "models"
+    first = {
+        path.relative_to(models): path.read_text(encoding="utf-8")
+        for path in sorted(models.rglob("*.py"))
+    }
+
+    runner.invoke(app, ["generate"])
+    second = {
+        path.relative_to(models): path.read_text(encoding="utf-8")
+        for path in sorted(models.rglob("*.py"))
+    }
+    assert first == second
+
+
+def test_generate_check_detects_missing_output(workdir: Path) -> None:
+    runner.invoke(app, ["init"])
+    result = runner.invoke(app, ["generate", "--check"])
+    assert result.exit_code == 1
+    assert "缺失" in result.output
+
+
+def test_generate_check_detects_manual_edit(workdir: Path) -> None:
+    runner.invoke(app, ["init"])
+    runner.invoke(app, ["generate"])
+    user_py = workdir / "models" / "user.py"
+    user_py.write_text(
+        user_py.read_text(encoding="utf-8") + "\n# 被人手动改过\n", encoding="utf-8"
+    )
+
+    result = runner.invoke(app, ["generate", "--check"])
+    assert result.exit_code == 1
+    assert "不一致" in result.output
+    # --check 是只读的：不能把文件改回去
+    assert "# 被人手动改过" in user_py.read_text(encoding="utf-8")
+
+
+def test_generate_check_detects_stale_config(workdir: Path) -> None:
+    """改了 models.yaml 却没重新生成。"""
+    runner.invoke(app, ["init"])
+    runner.invoke(app, ["generate"])
+    config_path = workdir / "models.yaml"
+    config_path.write_text(
+        config_path.read_text(encoding="utf-8").replace("String(50)", "String(80)"),
+        encoding="utf-8",
+    )
+
+    result = runner.invoke(app, ["generate", "--check"])
+    assert result.exit_code == 1
+    assert "不一致" in result.output
+
+
+def test_generate_check_detects_orphan_file(workdir: Path) -> None:
+    runner.invoke(app, ["init"])
+    runner.invoke(app, ["generate"])
+    (workdir / "models" / "orphan.py").write_text("# 孤儿文件\n", encoding="utf-8")
+
+    result = runner.invoke(app, ["generate", "--check"])
+    assert result.exit_code == 1
+    assert "多余" in result.output
+
+
+# ── migrate --dry-run（迁移预览）─────────────────────────────────────
+
+
+def test_migrate_dry_run_lists_changes(workdir: Path) -> None:
+    runner.invoke(app, ["init"])
+    runner.invoke(app, ["generate"])
+
+    result = runner.invoke(app, ["migrate", "--dry-run"])
+    assert result.exit_code == 0, result.output
+    assert "将要应用的 schema 变更" in result.output
+    assert "+ 表 users" in result.output
+    assert "+ 表 posts" in result.output
+    # 只读：不能生成迁移脚本
+    assert list((workdir / "migrations" / "versions").glob("*.py")) == []
+
+
+def test_migrate_dry_run_reports_no_changes_when_in_sync(workdir: Path) -> None:
+    runner.invoke(app, ["init"])
+    runner.invoke(app, ["generate"])
+    runner.invoke(app, ["migrate", "-m", "initial"])
+    runner.invoke(app, ["upgrade"])
+
+    result = runner.invoke(app, ["migrate", "--dry-run"])
+    assert result.exit_code == 0, result.output
+    assert "没有待应用的 schema 变更" in result.output
+
+
+def test_migrate_dry_run_detects_new_column(workdir: Path) -> None:
+    runner.invoke(app, ["init"])
+    runner.invoke(app, ["generate"])
+    runner.invoke(app, ["migrate", "-m", "initial"])
+    runner.invoke(app, ["upgrade"])
+
+    config_path = workdir / "models.yaml"
+    config_path.write_text(
+        config_path.read_text(encoding="utf-8").replace(
+            "      - name: published_at\n        type: DateTime\n        nullable: true\n",
+            "      - name: published_at\n"
+            "        type: DateTime\n"
+            "        nullable: true\n"
+            "      - name: views\n"
+            "        type: Integer\n"
+            "        nullable: false\n"
+            "        default: 0\n",
+        ),
+        encoding="utf-8",
+    )
+    runner.invoke(app, ["generate"])
+
+    result = runner.invoke(app, ["migrate", "--dry-run"])
+    assert result.exit_code == 0, result.output
+    assert "views" in result.output

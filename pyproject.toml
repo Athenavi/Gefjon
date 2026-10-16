@@ -9,7 +9,7 @@ description = "基于 YAML 配置生成 SQLAlchemy ORM 模型，并用 Alembic �
 readme = "README.md"
 requires-python = ">=3.10"
 license = { text = "MIT" }
-authors = [{ name = "雅典娜" }]
+authors = [{ name = "Athenavi" }]
 keywords = ["sqlalchemy", "alembic", "orm", "migration", "codegen"]
 classifiers = [
   "Programming Language :: Python :: 3",
@@ -32,9 +32,14 @@ dependencies = [
 
 [project.optional-dependencies]
 dev = ["pytest>=7.0"]
+# PostgreSQL 集成测试用的驱动（见 tests/test_postgres_integration.py）
+postgres = ["psycopg[binary]>=3.1"]
 
 [project.urls]
-Homepage = "https://github.com/yourusername/gefjon"
+Homepage = "https://github.com/Athenavi/Gefjon"
+Repository = "https://github.com/Athenavi/Gefjon"
+Issues = "https://github.com/Athenavi/Gefjon/issues"
+Changelog = "https://github.com/Athenavi/Gefjon/blob/main/CHANGELOG.md"
 
 [project.scripts]
 gefjon = "gefjon.cli:main"
@@ -51,9 +56,9 @@ where = ["scripts"]
 [tool.setuptools.package-data]
 gefjon = [
   "templates/*.jinja2",
-  "alembic_scaffold/*.py",
-  "alembic_scaffold/*.mako",
-  "alembic_scaffold/*.ini",
+  # alembic_scaffold 下的文件全部作为包数据：漏掉任何一个，
+  # pip 安装后 `gefjon init` 都会报“内置脚手架缺少文件”。
+  "alembic_scaffold/*",
 ]
 
 [tool.pytest.ini_options]

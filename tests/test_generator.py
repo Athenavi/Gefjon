@@ -556,3 +556,136 @@ def test_unlogged_emits_event_listener(tmp_path: Path) -> None:
     assert "text" in header
     assert 'event.listens_for(Event.__table__, "after_create")' in source
     assert 'ALTER TABLE {target.name} SET UNLOGGED' in source
+
+
+# ── relationship 的生成结果 ──────────────────────────────────────────
+
+
+def test_generated_files_use_lf_line_endings(project: Path) -> None:
+    """产物必须用 LF。
+
+    v0.1 用 write_text 的默认换行翻译，Windows 上会写出 CRLF，
+    使同一份 models.yaml 在不同平台得到不同产物（跨平台 diff 噪音）。
+    """
+    _generate(project)
+    for path in sorted((project / "models").rglob("*.py")):
+        data = path.read_bytes()
+        assert b"\r\n" not in data, f"{path} 含有 CRLF，应为 LF"
+
+
+def test_submodule_package_is_importable(tmp_path: Path, monkeypatch) -> None:
+    """带子目录的模型包必须能被**真正 import**。
+
+    v0.1 曾给子包 __init__.py 生成 `from ..x import X`（多了一层），
+    导致 `import models` 直接 ModuleNotFoundError —— 连带 alembic 的 env.py
+    也起不来。这里既断言前缀，也真的导入整个包。
+    """
+    package_name = "genpkg_" + uuid.uuid4().hex[:8]
+    (tmp_path / "models.yaml").write_text(
+        textwrap.dedent(
+            """
+            models:
+              - name: User
+                fields:
+                  - name: id
+                    type: Integer
+                    primary_key: true
+                  - name: token_id
+                    type: Integer
+                    foreign_key: tokens.id
+                    nullable: true
+              - name: Token
+                module: auth
+                fields:
+                  - name: id
+                    type: Integer
+                    primary_key: true
+            """
+        ),
+        encoding="utf-8",
+    )
+
+    config = load_config(tmp_path / "models.yaml")
+    generate_models(config, tmp_path / package_name, project_root=tmp_path, backup=False)
+
+    sub_init = (tmp_path / package_name / "auth" / "__init__.py").read_text(encoding="utf-8")
+    assert "from .token import Token" in sub_init
+    assert "from ..token" not in sub_init
+
+    # 模型文件引用 base 仍需上一层的相对导入
+    token_module = (tmp_path / package_name / "auth" / "token.py").read_text(encoding="utf-8")
+    assert "from ..base import Base" in token_module
+
+    monkeypatch.syspath_prepend(str(tmp_path))
+    importlib.invalidate_caches()
+    module = importlib.import_module(package_name)
+    try:
+        assert module.Token is not None
+        assert module.User is not None
+    finally:
+        for name in list(sys.modules):
+            if name == package_name or name.startswith(f"{package_name}."):
+                sys.modules.pop(name, None)
+
+
+def test_relationship_generation(tmp_path: Path, monkeypatch) -> None:
+    package_name = "genpkg_" + uuid.uuid4().hex[:8]
+    (tmp_path / "models.yaml").write_text(
+        textwrap.dedent(
+            """
+            models:
+              - name: User
+                fields:
+                  - name: id
+                    type: Integer
+                    primary_key: true
+                relationships:
+                  - name: posts
+                    target: Post
+                    back_populates: author
+                    cascade: "all, delete-orphan"
+                    lazy: selectin
+              - name: Post
+                fields:
+                  - name: id
+                    type: Integer
+                    primary_key: true
+                  - name: user_id
+                    type: Integer
+                    foreign_key: users.id
+                relationships:
+                  - name: author
+                    target: User
+                    back_populates: posts
+            """
+        ),
+        encoding="utf-8",
+    )
+
+    config = load_config(tmp_path / "models.yaml")
+    generate_models(
+        config, tmp_path / package_name, project_root=tmp_path, backup=False
+    )
+
+    source = (tmp_path / package_name / "user.py").read_text(encoding="utf-8")
+    compile(source, "user.py", "exec")
+    assert "from sqlalchemy.orm import relationship" in source
+    assert (
+        "posts = relationship('Post', back_populates='author', "
+        "cascade='all, delete-orphan', lazy='selectin')" in source
+    )
+
+    monkeypatch.syspath_prepend(str(tmp_path))
+    importlib.invalidate_caches()
+    module = importlib.import_module(package_name)
+    try:
+        # back_populates 真的配上了（SQLAlchemy 的 mapper 关系已建立）
+        assert "posts" in sa.inspect(module.User).relationships
+        assert "author" in sa.inspect(module.Post).relationships
+        assert sa.inspect(module.Post).relationships["author"].back_populates == (
+            "posts"
+        )
+    finally:
+        for name in list(sys.modules):
+            if name == package_name or name.startswith(f"{package_name}."):
+                sys.modules.pop(name, None)

@@ -1,0 +1,10 @@
+{
+  "case": "basic",
+  "files": {
+    "models/__init__.py": "2be42c1bd27a52b193548365a142baa2f8a87b591412696ef552b0b66a83194c",
+    "models/base.py": "b10233455be56eaf2aa4458dbe871d0a6bb004254c54e88aac16fc52506a2ab9",
+    "models/blog/__init__.py": "ce006e677065f7e9d47dfc8a6b1bbcaaa2dc02956c7f9373b6b435e1aefe644b",
+    "models/blog/post.py": "34edb2448e5850b888e293aaa3cb69646dc2a9b338b8f5fc1c862cac66d677f1",
+    "models/user.py": "faa3e6e48378aabd5dea1482e6b2537cd1e700e87742640f77b7a49353a2791d"
+  }
+}

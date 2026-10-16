@@ -2,7 +2,6 @@
 
 模型：{{ model.name }}
 表名：{{ model.table }}
-生成时间：{{ generation_time }}
 """
 {% for line in import_lines %}
 {{ line }}
@@ -24,6 +23,12 @@ class {{ model.name }}(Base):
 {% for field_line in field_lines %}
     {{ field_line }}
 {% endfor %}
+{% if relationship_lines %}
+
+{% for relationship_line in relationship_lines %}
+    {{ relationship_line }}
+{% endfor %}
+{% endif %}
 
     def to_dict(self):
         """返回 {列名: 值} 的字典。"""

@@ -1,0 +1,62 @@
+# models.yaml —— Gefjon 示例配置
+#
+# 这份文件是 schema 的唯一权威：Gefjon 把它编译成各生态的产物，
+# 连库、算 diff 与执行迁移交给该生态的原生工具（alembic / atlas / flyway）。
+#
+# 可选：声明要编译到哪些生态（不写则按 migration 段推断为 alembic）
+# targets:
+#   - kind: atlas        # Go 服务
+#     dir: db/migrations
+#   - kind: alembic      # Python 作业
+#     dir: migrations
+
+project:
+  name: myproject
+  version: 1.0.0
+
+database:
+  url: "sqlite:///./app.db"
+  dialect: sqlite
+
+models:
+  - name: User
+    table: users
+    description: 用户
+    fields:
+      - name: id
+        type: Integer
+        primary_key: true
+      - name: username
+        type: String(50)
+        nullable: false
+        unique: true
+      - name: email
+        type: String(100)
+        nullable: false
+      - name: created_at
+        type: DateTime
+        default: "func.now()"
+    indexes:
+      - columns: [email]
+        unique: true
+
+  - name: Post
+    table: posts
+    description: 文章
+    fields:
+      - name: id
+        type: Integer
+        primary_key: true
+      - name: title
+        type: String(200)
+        nullable: false
+      - name: content
+        type: Text
+        nullable: true
+      - name: user_id
+        type: Integer
+        foreign_key: users.id
+        nullable: true
+      - name: published_at
+        type: DateTime
+        nullable: true

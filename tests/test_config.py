@@ -887,3 +887,267 @@ def test_index_needs_columns_or_expressions(tmp_path: Path) -> None:
     )
     with pytest.raises(ConfigError, match="columns 或 expressions"):
         load_config(path)
+
+
+# ── relationship ─────────────────────────────────────────────────────
+
+
+def test_relationship_basic(tmp_path: Path) -> None:
+    path = _write(
+        tmp_path,
+        """
+        models:
+          - name: User
+            fields:
+              - name: id
+                type: Integer
+                primary_key: true
+            relationships:
+              - name: posts
+                target: Post
+                back_populates: author
+          - name: Post
+            fields:
+              - name: id
+                type: Integer
+                primary_key: true
+              - name: user_id
+                type: Integer
+                foreign_key: users.id
+            relationships:
+              - name: author
+                target: User
+                back_populates: posts
+        """,
+    )
+    user, post = load_config(path).models
+    assert user.relationships[0].name == "posts"
+    assert user.relationships[0].target == "Post"
+    assert user.relationships[0].back_populates == "author"
+    assert user.relationships[0].cascade is None
+    assert post.relationships[0].target == "User"
+
+
+def test_relationship_options(tmp_path: Path) -> None:
+    path = _write(
+        tmp_path,
+        """
+        models:
+          - name: User
+            fields:
+              - name: id
+                type: Integer
+                primary_key: true
+            relationships:
+              - name: posts
+                target: Post
+                back_populates: author
+                cascade: "all, delete-orphan"
+                lazy: SELECTIN
+              - name: profile
+                target: Profile
+                uselist: false
+              - name: tags
+                target: Tag
+                secondary: post_tags
+          - name: Post
+            fields:
+              - name: id
+                type: Integer
+                primary_key: true
+            relationships:
+              - name: author
+                target: User
+                back_populates: posts
+          - name: Profile
+            fields:
+              - name: id
+                type: Integer
+                primary_key: true
+          - name: Tag
+            fields:
+              - name: id
+                type: Integer
+                primary_key: true
+        """,
+    )
+    relationships = {item.name: item for item in load_config(path).models[0].relationships}
+    assert relationships["posts"].cascade == "all, delete-orphan"
+    assert relationships["posts"].lazy == "selectin"
+    assert relationships["profile"].uselist is False
+    assert relationships["tags"].secondary == "post_tags"
+
+
+def test_relationship_self_reference(tmp_path: Path) -> None:
+    path = _write(
+        tmp_path,
+        """
+        models:
+          - name: Category
+            fields:
+              - name: id
+                type: Integer
+                primary_key: true
+              - name: parent_id
+                type: Integer
+                foreign_key: categories.id
+                nullable: true
+            relationships:
+              - name: parent
+                target: Category
+                uselist: false
+        """,
+    )
+    relationship = load_config(path).models[0].relationships[0]
+    assert relationship.target == "Category"
+
+
+def test_relationship_unknown_target_is_rejected(tmp_path: Path) -> None:
+    path = _write(
+        tmp_path,
+        """
+        models:
+          - name: User
+            fields:
+              - name: id
+                type: Integer
+                primary_key: true
+            relationships:
+              - name: posts
+                target: Nope
+        """,
+    )
+    with pytest.raises(ConfigError, match="不存在的模型"):
+        load_config(path)
+
+
+def test_relationship_back_populates_must_exist(tmp_path: Path) -> None:
+    path = _write(
+        tmp_path,
+        """
+        models:
+          - name: User
+            fields:
+              - name: id
+                type: Integer
+                primary_key: true
+            relationships:
+              - name: posts
+                target: Post
+                back_populates: author
+          - name: Post
+            fields:
+              - name: id
+                type: Integer
+                primary_key: true
+        """,
+    )
+    with pytest.raises(ConfigError, match="back_populates"):
+        load_config(path)
+
+
+def test_relationship_name_conflicts_with_field(tmp_path: Path) -> None:
+    path = _write(
+        tmp_path,
+        """
+        models:
+          - name: User
+            fields:
+              - name: id
+                type: Integer
+                primary_key: true
+              - name: posts
+                type: Integer
+            relationships:
+              - name: posts
+                target: User
+        """,
+    )
+    with pytest.raises(ConfigError, match="与字段名冲突"):
+        load_config(path)
+
+
+@pytest.mark.parametrize(
+    "bad_relationship",
+    [
+        'name: "not an identifier"',
+        "name: posts",
+        "name: posts\n                target: 42",
+    ],
+)
+def test_relationship_name_must_be_identifier(
+    tmp_path: Path, bad_relationship: str
+) -> None:
+    path = _write(
+        tmp_path,
+        f"""
+        models:
+          - name: User
+            fields:
+              - name: id
+                type: Integer
+                primary_key: true
+            relationships:
+              - {bad_relationship}
+        """,
+    )
+    with pytest.raises(ConfigError):
+        load_config(path)
+
+
+def test_relationship_cascade_is_whitelisted(tmp_path: Path) -> None:
+    path = _write(
+        tmp_path,
+        """
+        models:
+          - name: User
+            fields:
+              - name: id
+                type: Integer
+                primary_key: true
+            relationships:
+              - name: posts
+                target: User
+                cascade: "all, DROP TABLE users"
+        """,
+    )
+    with pytest.raises(ConfigError, match="cascade"):
+        load_config(path)
+
+
+def test_relationship_lazy_is_whitelisted(tmp_path: Path) -> None:
+    path = _write(
+        tmp_path,
+        """
+        models:
+          - name: User
+            fields:
+              - name: id
+                type: Integer
+                primary_key: true
+            relationships:
+              - name: posts
+                target: User
+                lazy: "'; DROP TABLE users --"
+        """,
+    )
+    with pytest.raises(ConfigError, match="lazy"):
+        load_config(path)
+
+
+def test_relationship_must_be_mapping(tmp_path: Path) -> None:
+    path = _write(
+        tmp_path,
+        """
+        models:
+          - name: User
+            fields:
+              - name: id
+                type: Integer
+                primary_key: true
+            relationships:
+              - posts
+        """,
+    )
+    with pytest.raises(ConfigError, match="relationship 必须是映射"):
+        load_config(path)

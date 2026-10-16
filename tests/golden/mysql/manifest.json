@@ -1,0 +1,8 @@
+{
+  "case": "mysql",
+  "files": {
+    "models/__init__.py": "ad15852777934d0e488cf9534d3f2af94057d7e8ceb4e9aff3e0c7d7c243cb2f",
+    "models/base.py": "b10233455be56eaf2aa4458dbe871d0a6bb004254c54e88aac16fc52506a2ab9",
+    "models/product.py": "a5eb4eefdd4b56a485875d2520e806da82825fc698a307cf2625e2fb4fbcaadf"
+  }
+}

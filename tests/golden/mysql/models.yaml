@@ -1,0 +1,33 @@
+project:
+  name: golden-mysql
+  version: 3.0.0
+
+database:
+  dialect: mysql
+
+models:
+  - name: Product
+    table: products
+    description: 商品
+    fields:
+      - name: id
+        type: Integer
+        primary_key: true
+      - name: sku
+        type: VARCHAR(64)
+        nullable: false
+        unique: true
+      - name: body
+        type: LONGTEXT
+      - name: flags
+        type: mysql.SET
+        values: [a, b, c]
+      - name: released_year
+        type: YEAR
+      - name: price
+        type: mysql.DECIMAL(10, 2)
+    indexes:
+      - columns: [body]
+        prefix: fulltext
+      - columns: [sku]
+        lengths: {sku: 32}

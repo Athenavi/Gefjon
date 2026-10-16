@@ -89,6 +89,39 @@ WHERE_JOIN = re.compile(r"\s+(AND|OR)\s+", re.IGNORECASE)
 WHERE_FORBIDDEN = (";", "--", "/*", "*/", "(", ")", ",")
 
 
+# ── relationship 选项白名单 ──────────────────────────────────────────
+
+#: 允许的 cascade 取值
+ALLOWED_CASCADES = frozenset(
+    {
+        "save-update",
+        "merge",
+        "expunge",
+        "delete",
+        "delete-orphan",
+        "no-delete-orphan",
+        "refresh-expire",
+        "all",
+    }
+)
+
+#: 允许的 lazy 取值
+ALLOWED_LAZY = frozenset(
+    {
+        "select",
+        "joined",
+        "subquery",
+        "selectin",
+        "immediate",
+        "noload",
+        "raise",
+        "raise_on_sql",
+        "write_only",
+        "dynamic",
+    }
+)
+
+
 # ── 数据模型 ─────────────────────────────────────────────────────────
 
 
@@ -167,6 +200,19 @@ class UniqueConstraint:
 
 
 @dataclass(frozen=True)
+class Relationship:
+    """一个 ORM 关系，渲染成 ``relationship(...)``。"""
+
+    name: str
+    target: str
+    back_populates: str | None = None
+    cascade: str | None = None
+    lazy: str | None = None
+    uselist: bool | None = None
+    secondary: str | None = None
+
+
+@dataclass(frozen=True)
 class Model:
     name: str
     table: str
@@ -175,6 +221,8 @@ class Model:
     fields: tuple[Field, ...]
     indexes: tuple[Index, ...]
     unique_constraints: tuple[UniqueConstraint, ...]
+    #: ORM 关系（relationship）
+    relationships: tuple[Relationship, ...] = ()
     #: PostgreSQL：UNLOGGED 表
     unlogged: bool = False
 
@@ -313,20 +361,34 @@ def _parse_models(raw_models: Any, *, dialect: str | None = None) -> tuple[Model
     if not isinstance(raw_models, list):
         raise ConfigError("models 必须是列表")
 
+    # 第一遍：先收集所有模型名，这样 relationships 的 target 可以引用任意模型
+    model_names: list[str] = []
+    for entry in raw_models:
+        if not isinstance(entry, dict):
+            raise ConfigError(f"模型定义必须是映射，收到：{entry!r}")
+        entry_name = entry.get("name")
+        if not isinstance(entry_name, str) or not is_valid_identifier(entry_name):
+            raise ConfigError(f"模型名 {entry_name!r} 不是合法的 Python 类名")
+        model_names.append(entry_name)
+
     models: list[Model] = []
     seen: set[str] = set()
     for entry in raw_models:
-        model = _parse_model(entry, dialect=dialect)
+        model = _parse_model(entry, dialect=dialect, all_models=tuple(model_names))
         if model.name in seen:
             raise ConfigError(f"模型名重复：{model.name}")
         if model.table in {existing.table for existing in models}:
             raise ConfigError(f"表名重复：{model.table}")
         seen.add(model.name)
         models.append(model)
+
+    _validate_back_populates(tuple(models))
     return tuple(models)
 
 
-def _parse_model(entry: Any, *, dialect: str | None = None) -> Model:
+def _parse_model(
+    entry: Any, *, dialect: str | None = None, all_models: tuple[str, ...] = ()
+) -> Model:
     if not isinstance(entry, dict):
         raise ConfigError(f"模型定义必须是映射，收到：{entry!r}")
 
@@ -350,6 +412,12 @@ def _parse_model(entry: Any, *, dialect: str | None = None) -> Model:
     constraints = _parse_unique_constraints(
         entry.get("unique_constraints"), field_names
     )
+    relationships = _parse_relationships(
+        entry.get("relationships"),
+        model_name=name,
+        field_names=field_names,
+        all_models=all_models,
+    )
 
     return Model(
         name=name,
@@ -359,6 +427,7 @@ def _parse_model(entry: Any, *, dialect: str | None = None) -> Model:
         fields=fields,
         indexes=indexes,
         unique_constraints=constraints,
+        relationships=relationships,
         unlogged=unlogged,
     )
 
@@ -794,6 +863,134 @@ def _parse_unique_constraints(
             )
         )
     return tuple(constraints)
+
+
+def _parse_cascade(raw_cascade: Any, where: str) -> str | None:
+    if raw_cascade is None:
+        return None
+    if not isinstance(raw_cascade, str) or not raw_cascade.strip():
+        raise ConfigError(f"relationship {where} 的 cascade 必须是非空字符串")
+
+    parts = [part.strip().lower() for part in raw_cascade.split(",")]
+    for part in parts:
+        if part not in ALLOWED_CASCADES:
+            raise ConfigError(
+                f"relationship {where} 的 cascade 含未知取值 {part!r}；"
+                f"可用：{', '.join(sorted(ALLOWED_CASCADES))}"
+            )
+    return ", ".join(parts)
+
+
+def _parse_relationships(
+    raw_relationships: Any,
+    *,
+    model_name: str,
+    field_names: set[str],
+    all_models: tuple[str, ...],
+) -> tuple[Relationship, ...]:
+    """解析模型的关系定义。
+
+    ``target`` 必须是 models.yaml 里已声明的模型名；``cascade`` 与 ``lazy``
+    走白名单，因此不会把任意字符串写进生成的代码。
+    """
+    if raw_relationships is None:
+        return ()
+    if not isinstance(raw_relationships, list):
+        raise ConfigError(f"模型 {model_name} 的 relationships 必须是列表")
+
+    relationships: list[Relationship] = []
+    seen: set[str] = set()
+    for raw in raw_relationships:
+        if not isinstance(raw, dict):
+            raise ConfigError(f"模型 {model_name} 的 relationship 必须是映射：{raw!r}")
+
+        name = raw.get("name")
+        if not isinstance(name, str) or not is_valid_identifier(name):
+            raise ConfigError(
+                f"模型 {model_name} 的 relationship 名 {name!r} 不是合法的 Python 标识符"
+            )
+        if name in seen:
+            raise ConfigError(f"模型 {model_name} 的 relationship 名重复：{name}")
+        if name in field_names:
+            raise ConfigError(
+                f"模型 {model_name} 的 relationship 名 {name!r} 与字段名冲突"
+            )
+        seen.add(name)
+
+        target = raw.get("target")
+        if not isinstance(target, str) or not is_valid_identifier(target):
+            raise ConfigError(
+                f"模型 {model_name} 的 relationship {name} 缺少合法的 target"
+            )
+        if all_models and target not in all_models:
+            raise ConfigError(
+                f"模型 {model_name} 的 relationship {name} 指向不存在的模型 {target!r}；"
+                f"可用模型：{', '.join(all_models)}"
+            )
+
+        back_populates = raw.get("back_populates")
+        if back_populates is not None and (
+            not isinstance(back_populates, str)
+            or not is_valid_identifier(back_populates)
+        ):
+            raise ConfigError(
+                f"relationship {model_name}.{name} 的 back_populates 不是合法标识符"
+            )
+
+        secondary = raw.get("secondary")
+        if secondary is not None and (
+            not isinstance(secondary, str) or not _TABLE_NAME.match(secondary)
+        ):
+            raise ConfigError(
+                f"relationship {model_name}.{name} 的 secondary 表名非法：{secondary!r}"
+            )
+
+        lazy = raw.get("lazy")
+        if lazy is not None:
+            if not isinstance(lazy, str) or lazy.lower() not in ALLOWED_LAZY:
+                raise ConfigError(
+                    f"relationship {model_name}.{name} 的 lazy 只支持 "
+                    f"{', '.join(sorted(ALLOWED_LAZY))}，收到 {lazy!r}"
+                )
+            lazy = lazy.lower()
+
+        uselist = raw.get("uselist")
+        if uselist is not None and not isinstance(uselist, bool):
+            raise ConfigError(
+                f"relationship {model_name}.{name} 的 uselist 必须是布尔值"
+            )
+
+        relationships.append(
+            Relationship(
+                name=name,
+                target=target,
+                back_populates=back_populates,
+                cascade=_parse_cascade(raw.get("cascade"), f"{model_name}.{name}"),
+                lazy=lazy,
+                uselist=uselist,
+                secondary=secondary,
+            )
+        )
+    return tuple(relationships)
+
+
+def _validate_back_populates(models: tuple[Model, ...]) -> None:
+    """全部模型解析完成后，交叉校验 back_populates 指向的关系确实存在。"""
+    by_name = {model.name: model for model in models}
+    for model in models:
+        for relationship in model.relationships:
+            if not relationship.back_populates:
+                continue
+            target = by_name.get(relationship.target)
+            if target is None:
+                continue
+            target_names = {item.name for item in target.relationships}
+            if relationship.back_populates not in target_names:
+                raise ConfigError(
+                    f"模型 {model.name} 的关系 {relationship.name} 的 "
+                    f"back_populates={relationship.back_populates!r} "
+                    f"在模型 {target.name} 上不存在"
+                )
 
 
 def _validate_columns(columns: list[Any], field_names: set[str], kind: str) -> list[str]:

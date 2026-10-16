@@ -1,0 +1,9 @@
+{
+  "case": "postgres",
+  "files": {
+    "models/__init__.py": "9f1cba01225886fceee57f42028809efe20ef86074fca59ae37f09a6bbf0ee14",
+    "models/_gefjon_types.py": "11a29e9dc878c0db0856f2443d3d6c5bd63f9fe64f20d596cb522556723bde42",
+    "models/base.py": "b10233455be56eaf2aa4458dbe871d0a6bb004254c54e88aac16fc52506a2ab9",
+    "models/doc.py": "67f619d5996b32464847439b0f87576fe7a6dd4cbe4a7c9d973912412df48b05"
+  }
+}

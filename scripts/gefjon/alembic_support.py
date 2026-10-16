@@ -6,6 +6,8 @@
 
 from __future__ import annotations
 
+import importlib
+import sys
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -161,3 +163,119 @@ def print_history(config: AlembicConfig) -> None:
         command.history(config)
     except Exception as exc:
         raise MigrationError(f"读取迁移历史失败：{exc}") from exc
+
+
+# ── 迁移预览（--dry-run）─────────────────────────────────────────────
+
+
+def _prepare_import_path(project_root: Path) -> None:
+    """让**当前项目**的模型包优先被导入。
+
+    把项目根放到 ``sys.path`` 最前面。同一个进程里可能多次调用（测试、批量操作），
+    而不同项目的模型包名往往相同，若只是 append，``import models`` 会命中
+    ``sys.path`` 里更早的旧项目路径。
+    """
+    path_str = str(project_root)
+    if path_str in sys.path:
+        sys.path.remove(path_str)
+    sys.path.insert(0, path_str)
+
+
+def load_target_metadata(alembic_config: AlembicConfig, project_root: Path):
+    """按 alembic.ini 的 [gefjon] models_package 导入模型包的 Base.metadata。
+
+    每次都先清掉已缓存的同名包（含子模块），否则同一进程内二次调用会拿到
+    上一次导入的旧 metadata。
+    """
+    package = alembic_config.get_main_option("models_package") or "models"
+    _prepare_import_path(project_root)
+    for name in list(sys.modules):
+        if name == package or name.startswith(f"{package}."):
+            del sys.modules[name]
+    importlib.invalidate_caches()
+
+    try:
+        module = importlib.import_module(package)
+    except ImportError as exc:
+        raise MigrationError(
+            f"无法导入模型包 {package!r}：{exc}；请先运行 `gefjon generate`"
+        ) from exc
+
+    base = getattr(module, "Base", None)
+    if base is None:
+        raise MigrationError(
+            f"模型包 {package!r} 没有导出 Base；先运行 `gefjon generate` 重新生成"
+        )
+    return base.metadata
+
+
+def _format_diff(item: tuple) -> str:
+    """把 ``compare_metadata`` 的一条结果格式化成人能读的一行。"""
+    kind = item[0]
+
+    if kind in ("add_table", "remove_table"):
+        table = item[1]
+        return f"{'+' if kind == 'add_table' else '-'} 表 {table.name}"
+
+    if kind in ("add_column", "remove_column"):
+        _, _schema, table_name, column = item[:4]
+        return (
+            f"  {'+' if kind == 'add_column' else '-'} 列 "
+            f"{table_name}.{column.name} ({column.type})"
+        )
+
+    if kind == "modify_type":
+        _, _schema, table_name, column_name, existing, target = item[:6]
+        return f"  ~ 列 {table_name}.{column_name} 类型 {existing} -> {target}"
+
+    if kind in ("add_index", "remove_index"):
+        index = item[1]
+        table_name = getattr(getattr(index, "table", None), "name", "?")
+        return (
+            f"  {'+' if kind == 'add_index' else '-'} 索引 "
+            f"{index.name}（表 {table_name}）"
+        )
+
+    if kind in ("add_constraint", "remove_constraint"):
+        constraint = item[1]
+        table_name = getattr(getattr(constraint, "table", None), "name", "?")
+        name = getattr(constraint, "name", "?")
+        return (
+            f"  {'+' if kind == 'add_constraint' else '-'} 约束 "
+            f"{name}（表 {table_name}）"
+        )
+
+    return f"  ? {kind}: {item[1:]!r}"
+
+
+def preview_changes(
+    project_root: Path, project: GefjonConfig
+) -> tuple[str, ...]:
+    """比较模型与数据库，返回将要应用的变更摘要。
+
+    只读：不生成脚本、不执行任何 DDL。
+    """
+    from alembic.autogenerate import compare_metadata
+    from alembic.runtime.migration import MigrationContext
+
+    alembic_config = build_config(project_root, project.migration.directory)
+    ensure_database_url(alembic_config, project)
+    metadata = load_target_metadata(alembic_config, project_root)
+
+    database_url = resolve_database_url(
+        ini_url=ini_database_url(alembic_config), project_root=project_root
+    )
+
+    engine = create_engine(database_url, poolclass=NullPool)
+    try:
+        with engine.connect() as connection:
+            context = MigrationContext.configure(
+                connection, opts={"compare_type": True}
+            )
+            differences = compare_metadata(context, metadata)
+    except Exception as exc:
+        raise MigrationError(f"对比模型与数据库失败：{exc}") from exc
+    finally:
+        engine.dispose()
+
+    return tuple(_format_diff(item) for item in differences)

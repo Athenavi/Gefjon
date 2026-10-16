@@ -20,7 +20,7 @@ from typing import Iterable, Sequence
 
 from jinja2 import Environment, FileSystemLoader, StrictUndefined, TemplateNotFound
 
-from .config import Field, GefjonConfig, Index, Model
+from .config import Field, GefjonConfig, Index, Model, Relationship
 from .errors import GenerationError
 from .types import GENERATED_TYPES_MODULE, SQLALCHEMY
 
@@ -46,6 +46,30 @@ class GenerationResult:
     output_dir: Path
     files: tuple[GeneratedFile, ...]
     backup_dir: Path | None
+
+
+@dataclass(frozen=True)
+class RenderResult:
+    """渲染到内存的模型包（尚未落盘）。"""
+
+    files: tuple[GeneratedFile, ...]
+    pending: dict[Path, str]
+
+
+@dataclass(frozen=True)
+class CheckResult:
+    """``gefjon generate --check`` 的结果。"""
+
+    #: 应当存在但缺失的文件
+    missing: tuple[Path, ...] = ()
+    #: 内容与 models.yaml 渲染结果不一致的文件
+    changed: tuple[Path, ...] = ()
+    #: 输出目录里存在、但不属于本次渲染结果的 ``.py`` 文件（孤儿）
+    extra: tuple[Path, ...] = ()
+
+    @property
+    def ok(self) -> bool:
+        return not (self.missing or self.changed or self.extra)
 
 
 # ── 源码片段渲染 ─────────────────────────────────────────────────────
@@ -80,6 +104,26 @@ def _render_column(field: Field) -> str:
     parts.append(f"doc={field.doc_repr}")
 
     return f"{field.name} = Column({', '.join(parts)})"
+
+
+def _render_relationship(relationship: Relationship) -> str:
+    """渲染一个 ``relationship(...)`` 调用。
+
+    target / back_populates / secondary / cascade / lazy 都来自白名单校验后的
+    配置，并统一用 repr 转义。
+    """
+    parts: list[str] = [repr(relationship.target)]
+    if relationship.secondary:
+        parts.append(f"secondary={relationship.secondary!r}")
+    if relationship.back_populates:
+        parts.append(f"back_populates={relationship.back_populates!r}")
+    if relationship.cascade:
+        parts.append(f"cascade={relationship.cascade!r}")
+    if relationship.lazy:
+        parts.append(f"lazy={relationship.lazy!r}")
+    if relationship.uselist is not None:
+        parts.append(f"uselist={relationship.uselist!r}")
+    return f"{relationship.name} = relationship({', '.join(parts)})"
 
 
 def _render_table_args(model: Model) -> list[str]:
@@ -144,6 +188,8 @@ def _render_import_lines(model: Model) -> list[str]:
             by_module[SQLALCHEMY].add("text")
     if model.unique_constraints:
         by_module[SQLALCHEMY].add("UniqueConstraint")
+    if model.relationships:
+        by_module.setdefault("sqlalchemy.orm", set()).add("relationship")
     if model.unlogged:
         by_module[SQLALCHEMY].update({"event", "text"})
 
@@ -224,11 +270,16 @@ def _render_package_init(models: Sequence[Model]) -> str:
 
 
 def _render_subpackage_init(module: str, models: Sequence[Model]) -> str:
-    depth = len(module.split("/"))
-    prefix = "." * (depth + 1)
+    """渲染子包的 ``__init__.py``。
+
+    这里必须用**同层**的相对导入（``from .x import X``）：子包的 ``__init__.py``
+    与模型文件在同一个目录。v0.1 曾误用模型文件的深度公式（``depth + 1``），
+    生成出 ``from ..x import X``，导致整个模型包 ``import`` 时报
+    ``ModuleNotFoundError``（连带 alembic 的 env.py 也起不来）。
+    """
     lines = [f'"""{module} 子包 —— 由 Gefjon 生成，请勿手动修改。"""', ""]
     for model in sorted(models, key=lambda item: item.name):
-        lines.append(f"from {prefix}{model.module_name} import {model.name}")
+        lines.append(f"from .{model.module_name} import {model.name}")
     lines.append("")
     exported = ", ".join(f'"{model.name}"' for model in sorted(models, key=lambda i: i.name))
     lines.append(f"__all__ = [{exported}]")
@@ -239,10 +290,15 @@ def _render_subpackage_init(module: str, models: Sequence[Model]) -> str:
 
 
 def _write_atomic(path: Path, content: str) -> None:
+    """原子写入，并**始终使用 LF**。
+
+    显式指定 ``newline="\\n"``：否则 Windows 上会把换行翻译成 CRLF，
+    导致同一份 models.yaml 在不同平台生成出不同的模型文件（跨平台 diff 噪音）。
+    """
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_name(f".{path.name}.{os.getpid()}.tmp")
     try:
-        tmp.write_text(content, encoding="utf-8")
+        tmp.write_text(content, encoding="utf-8", newline="\n")
         os.replace(tmp, path)
     finally:
         if tmp.exists():
@@ -265,25 +321,19 @@ def _backup_output_dir(output_dir: Path, project_root: Path) -> Path | None:
 # ── 入口 ─────────────────────────────────────────────────────────────
 
 
-def generate_models(
+def render_package(
     config: GefjonConfig,
     output_dir: Path,
     *,
-    project_root: Path,
     selected: Iterable[str] | None = None,
-    backup: bool = True,
-) -> GenerationResult:
-    """渲染并写出模型包。
+) -> RenderResult:
+    """把整个模型包渲染到内存，不落盘。
 
-    Args:
-        config: 已校验的配置。
-        output_dir: 生成的模型包目录（例如 ``./models``）。
-        project_root: 项目根目录，备份写到 ``<project_root>/.gefjon/backups``。
-        selected: 只生成这些模型；None 表示全部。
-        backup: 是否在覆盖前备份现有输出目录。
+    渲染结果是**确定性**的：生成的文件里不含时间戳，所以 ``check_models``
+    可以直接比较内容，git diff 也只在真正变化时出现。
 
     Raises:
-        GenerationError: 模板缺失、渲染失败或未匹配到任何模型。
+        GenerationError: 模板缺失或渲染失败。
     """
     models = _select_models(config, selected)
 
@@ -295,9 +345,6 @@ def generate_models(
             f"模板缺失：{TEMPLATES_DIR / MODEL_TEMPLATE}（预期文件 {MODEL_TEMPLATE}）"
         ) from exc
 
-    generated_at = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-
-    # 1) 全部渲染到内存，任何失败都在写盘之前抛出
     pending: dict[Path, str] = {}
     files: list[GeneratedFile] = []
     for model in models:
@@ -306,8 +353,10 @@ def generate_models(
                 model=model,
                 import_lines=_render_import_lines(model),
                 field_lines=[_render_column(field) for field in model.fields],
+                relationship_lines=[
+                    _render_relationship(item) for item in model.relationships
+                ],
                 table_args=_render_table_args(model),
-                generation_time=generated_at,
             )
         except Exception as exc:  # 渲染失败绝不落盘
             raise GenerationError(f"渲染模型 {model.name} 失败：{exc}") from exc
@@ -336,15 +385,78 @@ def generate_models(
             module, module_models
         )
 
-    # 2) 全部渲染成功，才备份并落盘
+    return RenderResult(files=tuple(files), pending=pending)
+
+
+def generate_models(
+    config: GefjonConfig,
+    output_dir: Path,
+    *,
+    project_root: Path,
+    selected: Iterable[str] | None = None,
+    backup: bool = True,
+) -> GenerationResult:
+    """渲染并写出模型包。
+
+    Args:
+        config: 已校验的配置。
+        output_dir: 生成的模型包目录（例如 ``./models``）。
+        project_root: 项目根目录，备份写到 ``<project_root>/.gefjon/backups``。
+        selected: 只生成这些模型；None 表示全部。
+        backup: 是否在覆盖前备份现有输出目录。
+
+    Raises:
+        GenerationError: 模板缺失、渲染失败或未匹配到任何模型。
+    """
+    rendered = render_package(config, output_dir, selected=selected)
+
+    # 全部渲染成功，才备份并落盘
     backup_dir = _backup_output_dir(output_dir, project_root) if backup else None
-    for path, content in pending.items():
+    for path, content in rendered.pending.items():
         _write_atomic(path, content)
 
     return GenerationResult(
         output_dir=output_dir,
-        files=tuple(files),
+        files=rendered.files,
         backup_dir=backup_dir,
+    )
+
+
+def check_models(
+    config: GefjonConfig,
+    output_dir: Path,
+    *,
+    selected: Iterable[str] | None = None,
+) -> CheckResult:
+    """校验磁盘上的模型包是否与 models.yaml 一致（不写任何文件）。"""
+    rendered = render_package(config, output_dir, selected=selected)
+
+    missing: list[Path] = []
+    changed: list[Path] = []
+    for path, content in rendered.pending.items():
+        if not path.exists():
+            missing.append(path)
+            continue
+        try:
+            current = path.read_text(encoding="utf-8")
+        except OSError as exc:
+            raise GenerationError(f"无法读取 {path}：{exc}") from exc
+        if current != content:
+            changed.append(path)
+
+    expected = set(rendered.pending)
+    extra: list[Path] = []
+    if output_dir.exists():
+        for path in output_dir.rglob("*.py"):
+            if any(part == "__pycache__" for part in path.parts):
+                continue
+            if path not in expected:
+                extra.append(path)
+
+    return CheckResult(
+        missing=tuple(sorted(missing)),
+        changed=tuple(sorted(changed)),
+        extra=tuple(sorted(extra)),
     )
 
 

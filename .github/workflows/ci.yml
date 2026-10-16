@@ -1,0 +1,75 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    name: 测试 (Python ${{ matrix.python-version }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.10", "3.11", "3.12", "3.13"]
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: gefjon_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    env:
+      GEFJON_TEST_POSTGRES_DSN: postgresql://postgres:postgres@localhost:5432/gefjon_test
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - name: 安装依赖
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -e ".[dev,postgres]"
+
+      - name: 运行测试（含 PostgreSQL 集成测试）
+        run: python -m pytest -q
+
+  packaging:
+    name: 打包与安装冒烟
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: 构建 wheel
+        run: |
+          python -m pip install --upgrade build
+          python -m build --wheel
+
+      - name: 断言 wheel 含模板与脚手架
+        run: python .github/scripts/check_wheel_data.py
+
+      - name: 从 wheel 安装并冒烟运行
+        run: |
+          python -m pip install dist/*.whl --target "$RUNNER_TEMP/site"
+          mkdir -p "$RUNNER_TEMP/smoke"
+          cd "$RUNNER_TEMP/smoke"
+          export PYTHONPATH="$RUNNER_TEMP/site"
+          python -m gefjon.cli version
+          python -m gefjon.cli init
+          python -m gefjon.cli generate
+          python -m gefjon.cli migrate -m "ci smoke"
+          python -m gefjon.cli upgrade
+          python -m gefjon.cli status

@@ -1,0 +1,63 @@
+project:
+  name: golden-basic
+  version: 1.0.0
+
+database:
+  dialect: sqlite
+
+models:
+  - name: User
+    table: users
+    description: 用户
+    fields:
+      - name: id
+        type: Integer
+        primary_key: true
+      - name: username
+        type: String(50)
+        nullable: false
+        unique: true
+      - name: email
+        type: String(100)
+        nullable: false
+        index: true
+      - name: created_at
+        type: DateTime
+        default: "func.now()"
+      - name: metadata
+        type: Text
+        nullable: true
+    indexes:
+      - columns: [email]
+        unique: true
+    unique_constraints:
+      - name: uq_users_email_username
+        columns: [email, username]
+    relationships:
+      - name: posts
+        target: Post
+        back_populates: author
+
+  - name: Post
+    table: posts
+    module: blog
+    description: 文章
+    fields:
+      - name: id
+        type: Integer
+        primary_key: true
+      - name: title
+        type: String(200)
+        nullable: false
+      - name: content
+        type: Text
+        nullable: true
+      - name: user_id
+        type: Integer
+        foreign_key: users.id
+    relationships:
+      - name: author
+        target: User
+        back_populates: posts
+        cascade: "all, delete-orphan"
+        lazy: selectin

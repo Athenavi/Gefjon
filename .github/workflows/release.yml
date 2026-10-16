@@ -1,0 +1,89 @@
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+
+jobs:
+  build:
+    name: 构建与校验
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: 校验 tag 与包版本一致
+        run: |
+          tag="${GITHUB_REF_NAME#v}"
+          version="$(python -c 'import gefjon; print(gefjon.__version__)')"
+          echo "tag=v$tag  version=$version"
+          if [ "$tag" != "$version" ]; then
+            echo "::error::tag v$tag 与 scripts/gefjon/__init__.py 的 __version__ ($version) 不一致"
+            exit 1
+          fi
+
+      - name: 运行测试
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -e ".[dev]"
+          python -m pytest -q
+
+      - name: 构建 sdist 与 wheel
+        run: |
+          python -m pip install --upgrade build
+          python -m build
+
+      - name: 断言 wheel 含模板与脚手架
+        run: python .github/scripts/check_wheel_data.py
+
+      - name: 上传构建产物
+        uses: actions/upload-artifact@v4
+        with:
+          name: dist
+          path: dist/
+
+  publish:
+    name: 发布到 PyPI
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: pypi
+      url: https://pypi.org/p/gefjon
+    permissions:
+      id-token: write   # Trusted Publishing：不需要在仓库里存 token
+    steps:
+      - name: 下载构建产物
+        uses: actions/download-artifact@v4
+        with:
+          name: dist
+          path: dist/
+
+      - name: 上传到 PyPI
+        uses: pypa/gh-action-pypi-publish@release/v1
+
+  github-release:
+    name: 创建 GitHub Release
+    needs: publish
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: 下载构建产物
+        uses: actions/download-artifact@v4
+        with:
+          name: dist
+          path: dist/
+
+      - name: 创建 Release 并附加产物
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" \
+            --title "$GITHUB_REF_NAME" \
+            --generate-notes \
+            dist/*
