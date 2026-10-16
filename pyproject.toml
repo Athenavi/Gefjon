@@ -1,0 +1,62 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "gefjon"
+dynamic = ["version"]
+description = "基于 YAML 配置生成 SQLAlchemy ORM 模型，并用 Alembic 完成数据库迁移"
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+authors = [{ name = "雅典娜" }]
+keywords = ["sqlalchemy", "alembic", "orm", "migration", "codegen"]
+classifiers = [
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3 :: Only",
+  "Programming Language :: Python :: 3.10",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+  "License :: OSI Approved :: MIT License",
+  "Topic :: Database",
+]
+dependencies = [
+  "SQLAlchemy>=2.0",
+  "alembic>=1.7",
+  "Jinja2>=3.0",
+  "PyYAML>=6.0",
+  "typer>=0.9",
+  "python-dotenv>=1.0",
+  "cryptography>=41.0",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=7.0"]
+
+[project.urls]
+Homepage = "https://github.com/yourusername/gefjon"
+
+[project.scripts]
+gefjon = "gefjon.cli:main"
+
+[tool.setuptools]
+package-dir = { "" = "scripts" }
+
+[tool.setuptools.dynamic]
+version = { attr = "gefjon.__version__" }
+
+[tool.setuptools.packages.find]
+where = ["scripts"]
+
+[tool.setuptools.package-data]
+gefjon = [
+  "templates/*.jinja2",
+  "alembic_scaffold/*.py",
+  "alembic_scaffold/*.mako",
+  "alembic_scaffold/*.ini",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["scripts"]
+addopts = "-q"

@@ -1,0 +1,47 @@
+"""{{ model.description }} 模型 —— 由 Gefjon 生成，请勿手动修改。
+
+模型：{{ model.name }}
+表名：{{ model.table }}
+生成时间：{{ generation_time }}
+"""
+{% for line in import_lines %}
+{{ line }}
+{% endfor %}
+
+
+class {{ model.name }}(Base):
+    """{{ model.description }}"""
+
+    __tablename__ = {{ model.table_repr }}
+{% if table_args %}
+    __table_args__ = (
+{% for item in table_args %}
+        {{ item }},
+{% endfor %}
+    )
+{% endif %}
+
+{% for field_line in field_lines %}
+    {{ field_line }}
+{% endfor %}
+
+    def to_dict(self):
+        """返回 {列名: 值} 的字典。"""
+        return {
+            attribute.key: getattr(self, attribute.key)
+            for attribute in self.__mapper__.column_attrs
+        }
+
+    def __repr__(self):
+        primary_key = self.__mapper__.primary_key
+        values = ", ".join(
+            f"{column.key}={getattr(self, column.key)!r}" for column in primary_key
+        )
+        return f"<{{ model.name }} {values}>"
+{% if model.unlogged %}
+
+# PostgreSQL UNLOGGED 表：SQLAlchemy 没有对应参数，建表后立刻改属性
+@event.listens_for({{ model.name }}.__table__, "after_create")
+def _gefjon_set_unlogged_{{ model.name | lower }}(target, connection, **kw):
+    connection.execute(text(f"ALTER TABLE {target.name} SET UNLOGGED"))
+{% endif %}
